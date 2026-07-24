@@ -55,10 +55,6 @@ impl PlainTarDataset {
         println!("Indexing remote Hugging Face WebDataset shards ({}) ...", num_shards);
 
         let token = std::env::var("HF_TOKEN").unwrap_or_default();
-        if token.is_empty() {
-            println!("⚠️ WARNING: HF_TOKEN environment variable is not set!");
-        }
-
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
@@ -67,6 +63,7 @@ impl PlainTarDataset {
         let mut items = Vec::new();
 
         for shard_idx in 0..num_shards {
+            // Using resolve/main raw endpoint for LFS tar files
             let shard_url = format!(
                 "https://huggingface.co/datasets/timm/imagenet-1k-wds/resolve/main/imagenet1k-{}-{:04}.tar",
                 prefix, shard_idx
@@ -89,15 +86,16 @@ impl PlainTarDataset {
 
             if !response.status().is_success() {
                 println!(
-                    "❌ HTTP Error {} when accessing shard. Check your HF_TOKEN or dataset permissions!",
-                    response.status()
+                    "❌ HTTP Error {} when accessing shard: {}",
+                    response.status(),
+                    shard_url
                 );
                 continue;
             }
 
             let mut archive = Archive::new(response);
             let Ok(entries) = archive.entries() else {
-                println!("Could not read remote archive {}", shard_url);
+                println!("Could not read remote archive stream for {}", shard_url);
                 continue;
             };
 
