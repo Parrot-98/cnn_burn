@@ -8,7 +8,7 @@ use image::ImageReader;
 use serde::{Deserialize, Serialize};
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::File,
     io::{BufReader, BufWriter, Cursor, Read},
     path::Path,
@@ -36,13 +36,9 @@ pub struct PlainTarDataset {
 
 impl PlainTarDataset {
     /// Index remote WebDataset shards from Hugging Face over HTTP without saving to disk.
-    ///
-    /// - `prefix`: "validation" (64 shards) or "train" (1024 shards)
-    /// - `num_shards`: Number of `.tar` shards to index
     pub fn new_from_huggingface(prefix: &str, num_shards: usize) -> Self {
         let cache_path = Path::new("hf_dataset_index.json");
 
-        // Load cached index if present locally to save network calls on restart
         if cache_path.exists() {
             println!("Loading cached dataset index from {:?}...", cache_path);
             if let Ok(file) = File::open(cache_path) {
@@ -56,11 +52,9 @@ impl PlainTarDataset {
 
         println!("Indexing remote Hugging Face WebDataset shards ({}) ...", num_shards);
 
-        let mut raw_items: Vec<(String, String, String)> = Vec::new();
-        let mut class_names: HashSet<String> = HashSet::new();
-
         let token = std::env::var("HF_TOKEN").unwrap_or_default();
         let client = reqwest::blocking::Client::new();
+        let mut items = Vec::new();
 
         for shard_idx in 0..num_shards {
             let shard_url = format!(
@@ -81,73 +75,56 @@ impl PlainTarDataset {
             };
 
             let mut archive = Archive::new(response);
-
             let Ok(entries) = archive.entries() else {
                 println!("Could not read remote archive {}", shard_url);
                 continue;
             };
 
-            for tar_entry in entries.flatten() {
-                let Ok(file_path) = tar_entry.path() else {
-                    continue;
-                };
+            // Map sample stem ID (e.g. "000001") to (image_filename, label)
+            let mut pending_images: HashMap<String, String> = HashMap::new();
+            let mut pending_labels: HashMap<String, usize> = HashMap::new();
 
+            for tar_entry in entries.flatten() {
+                let Ok(file_path) = tar_entry.path() else { continue };
                 let filename = file_path.to_string_lossy().into_owned();
 
-                // WebDataset stores images as .jpg/.jpeg/.png
-                if !filename.ends_with(".jpg")
-                    && !filename.ends_with(".jpeg")
-                    && !filename.ends_with(".png")
-                    && !filename.ends_with(".JPEG")
-                {
-                    continue;
+                let Some(path) = Path::new(&filename).file_name() else { continue };
+                let stem = path.to_string_lossy().to_string();
+                let stem_name = stem.split('.').next().unwrap_or("").to_string();
+
+                if filename.ends_with(".jpg") || filename.ends_with(".jpeg") || filename.ends_with(".png") || filename.ends_with(".JPEG") {
+                    if let Some(&label) = pending_labels.get(&stem_name) {
+                        items.push(RemoteTarEntry {
+                            shard_url: shard_url.clone(),
+                            filename: filename.clone(),
+                            label,
+                        });
+                    } else {
+                        pending_images.insert(stem_name, filename);
+                    }
+                } else if filename.ends_with(".cls") {
+                    // WebDataset .cls files contain the integer class label as text
+                    let mut entry = tar_entry;
+                    let mut content = String::new();
+                    if entry.read_to_string(&mut content).is_ok() {
+                        if let Ok(label) = content.trim().parse::<usize>() {
+                            if let Some(img_filename) = pending_images.remove(&stem_name) {
+                                items.push(RemoteTarEntry {
+                                    shard_url: shard_url.clone(),
+                                    filename: img_filename,
+                                    label,
+                                });
+                            } else {
+                                pending_labels.insert(stem_name, label);
+                            }
+                        }
+                    }
                 }
-
-                let Some(file_name) = Path::new(&filename).file_name() else {
-                    continue;
-                };
-
-                let clean_filename = file_name.to_string_lossy();
-                let class_key = clean_filename
-                    .split('_')
-                    .next()
-                    .unwrap_or("");
-
-                if !class_key.starts_with('n') {
-                    continue;
-                }
-
-                let class_key = class_key.to_string();
-                class_names.insert(class_key.clone());
-
-                raw_items.push((shard_url.clone(), filename, class_key));
             }
         }
 
-        println!("Found {} unique classes across remote shards!", class_names.len());
+        println!("Successfully indexed {} images across remote shards!", items.len());
 
-        let mut sorted_classes: Vec<String> = class_names.into_iter().collect();
-        sorted_classes.sort();
-
-        let class_map: HashMap<String, usize> = sorted_classes
-            .into_iter()
-            .enumerate()
-            .map(|(label, class_name)| (class_name, label))
-            .collect();
-
-        let items: Vec<RemoteTarEntry> = raw_items
-            .into_iter()
-            .filter_map(|(shard_url, filename, class_key)| {
-                let label = class_map.get(&class_key)?;
-                Some(RemoteTarEntry {
-                    shard_url,
-                    filename,
-                    label: *label,
-                })
-            })
-            .collect();
-
-        // Save local JSON index so indexing only happens once
         if let Ok(file) = File::create(cache_path) {
             let writer = BufWriter::new(file);
             let _ = serde_json::to_writer(writer, &items);
@@ -161,10 +138,7 @@ impl PlainTarDataset {
         let train_items = self.items[..split_index].to_vec();
         let valid_items = self.items[split_index..].to_vec();
 
-        (
-            Self { items: train_items },
-            Self { items: valid_items },
-        )
+        (Self { items: train_items }, Self { items: valid_items })
     }
 
     fn read_image_from_stream(shard_url: &str, filename: &str) -> Option<Vec<f32>> {
@@ -192,12 +166,7 @@ impl PlainTarDataset {
                     .decode()
                     .ok()?;
 
-                let resized = img.resize_exact(
-                    224,
-                    224,
-                    image::imageops::FilterType::Triangle,
-                );
-
+                let resized = img.resize_exact(224, 224, image::imageops::FilterType::Triangle);
                 let rgb = resized.to_rgb8();
 
                 let mut r_chan = Vec::with_capacity(224 * 224);
@@ -205,14 +174,9 @@ impl PlainTarDataset {
                 let mut b_chan = Vec::with_capacity(224 * 224);
 
                 for pixel in rgb.pixels() {
-                    let r = pixel[0] as f32 / 255.0;
-                    let g = pixel[1] as f32 / 255.0;
-                    let b = pixel[2] as f32 / 255.0;
-
-                    // Standard ImageNet mean/std normalization
-                    let r = (r - 0.485) / 0.229;
-                    let g = (g - 0.456) / 0.224;
-                    let b = (b - 0.406) / 0.225;
+                    let r = (pixel[0] as f32 / 255.0 - 0.485) / 0.229;
+                    let g = (pixel[1] as f32 / 255.0 - 0.456) / 0.224;
+                    let b = (pixel[2] as f32 / 255.0 - 0.406) / 0.225;
 
                     r_chan.push(r);
                     g_chan.push(g);
