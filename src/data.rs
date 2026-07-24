@@ -44,8 +44,10 @@ impl PlainTarDataset {
             if let Ok(file) = File::open(cache_path) {
                 let reader = BufReader::new(file);
                 if let Ok(items) = serde_json::from_reader::<_, Vec<RemoteTarEntry>>(reader) {
-                    println!("Successfully loaded cached index with {} images!", items.len());
-                    return Self { items };
+                    if !items.is_empty() {
+                        println!("Successfully loaded cached index with {} images!", items.len());
+                        return Self { items };
+                    }
                 }
             }
         }
@@ -53,7 +55,15 @@ impl PlainTarDataset {
         println!("Indexing remote Hugging Face WebDataset shards ({}) ...", num_shards);
 
         let token = std::env::var("HF_TOKEN").unwrap_or_default();
-        let client = reqwest::blocking::Client::new();
+        if token.is_empty() {
+            println!("⚠️ WARNING: HF_TOKEN environment variable is not set!");
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .unwrap();
+
         let mut items = Vec::new();
 
         for shard_idx in 0..num_shards {
@@ -69,10 +79,21 @@ impl PlainTarDataset {
                 request = request.bearer_auth(&token);
             }
 
-            let Ok(response) = request.send() else {
-                println!("Failed to connect to {}", shard_url);
-                continue;
+            let response = match request.send() {
+                Ok(res) => res,
+                Err(err) => {
+                    println!("❌ Network error connecting to {}: {}", shard_url, err);
+                    continue;
+                }
             };
+
+            if !response.status().is_success() {
+                println!(
+                    "❌ HTTP Error {} when accessing shard. Check your HF_TOKEN or dataset permissions!",
+                    response.status()
+                );
+                continue;
+            }
 
             let mut archive = Archive::new(response);
             let Ok(entries) = archive.entries() else {
@@ -80,7 +101,6 @@ impl PlainTarDataset {
                 continue;
             };
 
-            // Map sample stem ID (e.g. "000001") to (image_filename, label)
             let mut pending_images: HashMap<String, String> = HashMap::new();
             let mut pending_labels: HashMap<String, usize> = HashMap::new();
 
@@ -92,7 +112,8 @@ impl PlainTarDataset {
                 let stem = path.to_string_lossy().to_string();
                 let stem_name = stem.split('.').next().unwrap_or("").to_string();
 
-                if filename.ends_with(".jpg") || filename.ends_with(".jpeg") || filename.ends_with(".png") || filename.ends_with(".JPEG") {
+                let lower = filename.to_lowercase();
+                if lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") {
                     if let Some(&label) = pending_labels.get(&stem_name) {
                         items.push(RemoteTarEntry {
                             shard_url: shard_url.clone(),
@@ -102,8 +123,7 @@ impl PlainTarDataset {
                     } else {
                         pending_images.insert(stem_name, filename);
                     }
-                } else if filename.ends_with(".cls") {
-                    // WebDataset .cls files contain the integer class label as text
+                } else if lower.ends_with(".cls") {
                     let mut entry = tar_entry;
                     let mut content = String::new();
                     if entry.read_to_string(&mut content).is_ok() {
@@ -125,9 +145,11 @@ impl PlainTarDataset {
 
         println!("Successfully indexed {} images across remote shards!", items.len());
 
-        if let Ok(file) = File::create(cache_path) {
-            let writer = BufWriter::new(file);
-            let _ = serde_json::to_writer(writer, &items);
+        if !items.is_empty() {
+            if let Ok(file) = File::create(cache_path) {
+                let writer = BufWriter::new(file);
+                let _ = serde_json::to_writer(writer, &items);
+            }
         }
 
         Self { items }
@@ -143,14 +165,21 @@ impl PlainTarDataset {
 
     fn read_image_from_stream(shard_url: &str, filename: &str) -> Option<Vec<f32>> {
         let token = std::env::var("HF_TOKEN").unwrap_or_default();
-        let client = reqwest::blocking::Client::new();
-        let mut request = client.get(shard_url);
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .ok()?;
 
+        let mut request = client.get(shard_url);
         if !token.is_empty() {
             request = request.bearer_auth(&token);
         }
 
         let response = request.send().ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+
         let mut archive = Archive::new(response);
 
         for entry in archive.entries().ok()? {
