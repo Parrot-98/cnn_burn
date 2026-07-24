@@ -55,6 +55,10 @@ impl PlainTarDataset {
         println!("Indexing remote Hugging Face WebDataset shards ({}) ...", num_shards);
 
         let token = std::env::var("HF_TOKEN").unwrap_or_default();
+        if token.is_empty() {
+            println!("⚠️ WARNING: HF_TOKEN environment variable is not set!");
+        }
+
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
@@ -63,10 +67,16 @@ impl PlainTarDataset {
         let mut items = Vec::new();
 
         for shard_idx in 0..num_shards {
-            // Using resolve/main raw endpoint for LFS tar files
+            // Train uses 4 digits (0000..1023), Validation uses 2 digits (00..63)
+            let shard_name = if prefix == "validation" || prefix == "val" {
+                format!("imagenet1k-{}-{:02}.tar", prefix, shard_idx)
+            } else {
+                format!("imagenet1k-{}-{:04}.tar", prefix, shard_idx)
+            };
+
             let shard_url = format!(
-                "https://huggingface.co/datasets/timm/imagenet-1k-wds/resolve/main/imagenet1k-{}-{:04}.tar",
-                prefix, shard_idx
+                "https://huggingface.co/datasets/timm/imagenet-1k-wds/resolve/main/{}",
+                shard_name
             );
 
             println!("Indexing remote shard: {}...", shard_url);
