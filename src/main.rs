@@ -25,25 +25,29 @@ fn main() {
     let device = WgpuDevice::default();
 
     println!("Initializing datasets from tar files...");
-    let dataset = PlainTarDataset::new_from_huggingface("validation", 64);
+    let mut dataset = PlainTarDataset::new_from_huggingface("validation", 1);
 
-    // Utilize your i9 with 12 workers
-    let batcher_train = ImageBatcher::<MyAutodiffBackend>::new(device.clone());
+    // Use only a few images while debugging.
+    dataset.items.truncate(16);
+
+    println!("Dataset contains {} indexed images", dataset.items.len());
+
+    let batcher_train =
+        ImageBatcher::<MyAutodiffBackend>::new(device.clone());
+
     let dataloader_train = DataLoaderBuilder::new(batcher_train)
-        .batch_size(8)
+        .batch_size(1)
         .shuffle(42)
-        .num_workers(12)
+        .num_workers(0)
         .build(dataset.clone());
 
-    let batcher_val = ImageBatcher::<MyBackend>::new(device.clone());
-    let dataloader_val = DataLoaderBuilder::new(batcher_val)
-        .batch_size(8)
-        .num_workers(12)
-        .build(dataset);
+    let batcher_val =
+        ImageBatcher::<MyBackend>::new(device.clone());
 
-    let model = ConvNet::<MyAutodiffBackend>::new(1000, &device);
-    let optimizer = AdamConfig::new().init();
-
+let dataloader_val = DataLoaderBuilder::new(batcher_val)
+    .batch_size(1)
+    .num_workers(0)
+    .build(dataset);
     // TextRenderer outputs standard line-by-line text to fix black-screen issues
     let learner = LearnerBuilder::<
         MyAutodiffBackend,

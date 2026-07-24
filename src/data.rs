@@ -171,7 +171,53 @@ impl PlainTarDataset {
         (Self { items: train_items }, Self { items: valid_items })
     }
 
-    fn read_image_from_stream(shard_url: &str, filename: &str) -> Option<Vec<f32>> {
+fn read_image_from_stream(
+    shard_url: &str,
+    filename: &str,
+) -> Option<Vec<f32>> {
+    println!("Downloading shard for image: {}", filename);
+
+    let token = std::env::var("HF_TOKEN").unwrap_or_default();
+
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .ok()?;
+
+    println!("Requesting: {}", shard_url);
+
+    let mut request = client.get(shard_url);
+
+    if !token.is_empty() {
+        request = request.bearer_auth(&token);
+    }
+
+    let response = match request.send() {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("Download failed: {error}");
+            return None;
+        }
+    };
+
+    println!(
+        "Response received for {}: {}",
+        filename,
+        response.status()
+    );
+
+    if !response.status().is_success() {
+        eprintln!(
+            "HTTP error {} for {}",
+            response.status(),
+            shard_url
+        );
+        return None;
+    }
+
+    // Continue with your existing Archive code here.
         let token = std::env::var("HF_TOKEN").unwrap_or_default();
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
