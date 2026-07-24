@@ -48,7 +48,7 @@ fn main() {
     let dataloader_train = DataLoaderBuilder::new(batcher_train)
         .batch_size(1)
         .shuffle(42)
-        .num_workers(0)
+        .num_workers(1)
         .build(dataset.clone());
 
     let batcher_val =
@@ -56,7 +56,7 @@ fn main() {
 
     let dataloader_val = DataLoaderBuilder::new(batcher_val)
         .batch_size(1)
-        .num_workers(0)
+        .num_workers(1)
         .build(dataset);
 
     println!("Creating model...");
